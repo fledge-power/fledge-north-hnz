@@ -263,9 +263,11 @@ void EnhancedHNZServer::receiving_loop()
 void EnhancedHNZServer::sendSARMLoop()
 {
   // Reset SARM/UA variables in case of reconnect
+  {
   std::lock_guard<std::mutex> guard(m_sarm_ua_mutex);
   ua_ok = false;
   sarm_ok = false;
+  }
 
   bool sarm_ua_ok = false;
   while (is_running && !sarm_ua_ok)
