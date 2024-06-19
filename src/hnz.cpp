@@ -10,13 +10,16 @@
 #include <algorithm>
 
 // The duration, in milliseconds, for which the thread server sleeps before checking for io.
-static const int THREAD_SERVER_SLEEPING_DURATION_IN_MS = 2000;
+static const int THREAD_SERVER_SLEEPING_DURATION_IN_MS = 500;
 
 // The duration, in seconds, for which the thread is server ready wait.
-static const int SERVER_IS_READY_DURATION = 10;
+static const int SERVER_IS_READY_DURATION = 3;
 
 // The duration, in milliseconds, for which the pivot object is sent to the center
 static const int PIVOT_TO_HNZ_CENTER_DURATION = 500;
+
+// Max messages to send per transmission to the center
+static const int MESSAGE_PER_TRANSMISSION = 10;
 
 void HNZ::start()
 {
@@ -220,17 +223,15 @@ uint32_t HNZ::send(std::vector<Reading *> &readings)
   const auto size_before_read = static_cast<uint32_t>(readings.size());
 
   readings.erase(std::remove_if(readings.begin(), readings.end(), [this](Reading *read)
-                       {
-      if (nullptr == read)
-      {
-        return false;
-      }
-      
+                                {
+                                  if (nullptr == read)
+                                  {
+                                    return false;
+                                  }
 
-      return readDataObject(read); 
-      
-  }), readings.end());
-
+                                  return readDataObject(read);
+                                }),
+                 readings.end());
 
   const auto size = static_cast<uint32_t>(readings.size());
   return size_before_read - size;
@@ -484,6 +485,18 @@ void HNZ::manageReceivedFrames(const std::vector<std::shared_ptr<MSG_TRAME>> &re
                                 false);
         server->getStateMachine()->setCgSent(true);
       }
+      // bulle
+      if (frame->usLgBuffer > 3 && frame->aubTrame[2] == 0x13 && frame->aubTrame[3] == 0x4)
+      {
+        HnzUtility::log_info("%s message bulle received", beforeLog.c_str());
+
+        if (!m_hnz_data_to_send.empty())
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          sendWaitingData(server);
+        }
+      }
+
       // tc
       else if (frame->aubTrame[2] == TC_CODE)
       {
@@ -544,20 +557,32 @@ void HNZ::manageReceivedFrames(const std::vector<std::shared_ptr<MSG_TRAME>> &re
 
 void HNZ::sendWaitingData(const std::shared_ptr<EnhancedHNZServer> &server)
 {
-  std::string beforeLog = HnzUtility::PluginName + " - HNZ::sendWaitingData -";
-  // send value
-  std::lock_guard<std::mutex> lock(m_data_mtx);
-  if (server->getStateMachine()->isCGSent() && !m_hnz_data_to_send.empty())
-  {
-    HnzUtility::log_debug("%s Send %d TIs to HNZ Centre", beforeLog.c_str(), m_hnz_data_to_send.size());
-    for (const auto &data_to_send : m_hnz_data_to_send)
-    {
-      server->sendFrame(data_to_send, false);
-      std::this_thread::sleep_for(std::chrono::milliseconds(PIVOT_TO_HNZ_CENTER_DURATION));
-    }
+  const std::string beforeLog = HnzUtility::PluginName + " - HNZ::sendWaitingData -";
 
-    m_hnz_data_to_send.clear();
+  std::lock_guard<std::mutex> lock(m_data_mtx);
+
+  if (m_hnz_data_to_send.empty())
+  {
+    return;
   }
+
+  const auto size = std::min(static_cast<size_t>(MESSAGE_PER_TRANSMISSION), m_hnz_data_to_send.size());
+  HnzUtility::log_debug("%s Send [%d] %d TIs to HNZ Centre", beforeLog.c_str(), server->getPort(), size);
+
+  // copy message to send
+  std::vector<unsigned char> message;
+
+  for (size_t i = 0; i < size; ++i)
+  {
+    const auto &data_to_send = m_hnz_data_to_send.at(i);
+    for (const auto &c : data_to_send)
+    {
+      message.push_back(c);
+    }
+  }
+  m_hnz_data_to_send.erase(m_hnz_data_to_send.begin(), std::next(m_hnz_data_to_send.begin(), size));
+  server->sendFrame(message, false);
+  server->getStateMachine()->sendInformation();
 }
 
 void HNZ::managerServer(const std::shared_ptr<EnhancedHNZServer> &server)
@@ -574,7 +599,6 @@ void HNZ::managerServer(const std::shared_ptr<EnhancedHNZServer> &server)
       const auto receivedFrames = server->popLastFramesReceived();
 
       manageReceivedFrames(receivedFrames, server);
-      sendWaitingData(server);
     }
 
     if (server->isRunning() == false && m_is_running == true)
